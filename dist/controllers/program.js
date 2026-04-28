@@ -41,9 +41,18 @@ async function getActiveProgram(req, res) {
        SELECT AVG(kalori_makan) as avg_kalori_makan, AVG(air_liter) as avg_air_liter, 
               AVG(bakar_kalori) as avg_bakar_kalori, AVG(jam_istirahat) as avg_jam_istirahat, COUNT(*) as days_logged
        FROM daily_logs WHERE program_id = ? AND log_date >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)`, [program.id]);
+        const { weekOffset } = req.query;
+        const offset = Number(weekOffset) || 0;
+        const last7DaysLogs = await (0, db_1.query)(`
+       SELECT log_date, kalori_makan, air_liter, bakar_kalori, jam_istirahat 
+       FROM daily_logs 
+       WHERE program_id = ? 
+         AND log_date >= DATE_SUB(DATE_SUB(CURDATE(), INTERVAL (WEEKDAY(CURDATE())) DAY), INTERVAL ? WEEK)
+         AND log_date < DATE_ADD(DATE_SUB(DATE_SUB(CURDATE(), INTERVAL (WEEKDAY(CURDATE())) DAY), INTERVAL ? WEEK), INTERVAL 7 DAY)
+       ORDER BY log_date ASC`, [program.id, offset, offset]);
         const daysElapsed = Math.floor((new Date().getTime() - new Date(program.start_date).getTime()) / 86400000);
         const progressPercent = Math.min(100, Math.round((Math.max(0, daysElapsed) / program.target_durasi_program) * 100)) || 0;
-        res.json({ program, todayLog, weekStats, daysElapsed, progressPercent });
+        res.json({ program, todayLog, weekStats, last7DaysLogs, daysElapsed, progressPercent });
     }
     catch (err) {
         console.error(err);
@@ -95,14 +104,14 @@ async function saveProgress(req, res) {
     try {
         if (!req.user)
             return res.status(401).send();
-        const { program_id, kalori_makan, air_liter, bakar_kalori, jam_istirahat, mood, stress_level, weight_kg, notes } = req.body;
+        const { program_id, kalori_makan, air_liter, bakar_kalori, jam_istirahat, mood, stress_level, weight_kg, notes, sleep_start, sleep_end, sleep_quality } = req.body;
         const today = new Date().toISOString().split('T')[0];
         const existing = await (0, db_1.queryOne)('SELECT id FROM daily_logs WHERE program_id = ? AND log_date = ?', [program_id, today]);
         if (existing) {
-            await (0, db_1.execute)('UPDATE daily_logs SET kalori_makan=?, air_liter=?, bakar_kalori=?, jam_istirahat=?, mood=?, stress_level=?, weight_kg=?, notes=? WHERE program_id=? AND log_date=?', [kalori_makan, air_liter, bakar_kalori, jam_istirahat, mood, stress_level || 5, weight_kg || null, notes || null, program_id, today]);
+            await (0, db_1.execute)('UPDATE daily_logs SET kalori_makan=?, air_liter=?, bakar_kalori=?, jam_istirahat=?, mood=?, stress_level=?, weight_kg=?, notes=?, sleep_start=?, sleep_end=?, sleep_quality=? WHERE program_id=? AND log_date=?', [kalori_makan, air_liter, bakar_kalori, jam_istirahat, mood, stress_level || 5, weight_kg || null, notes || null, sleep_start || null, sleep_end || null, sleep_quality || null, program_id, today]);
         }
         else {
-            await (0, db_1.execute)('INSERT INTO daily_logs (program_id, user_id, log_date, kalori_makan, air_liter, bakar_kalori, jam_istirahat, mood, stress_level, weight_kg, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [program_id, req.user.id, today, kalori_makan, air_liter, bakar_kalori, jam_istirahat, mood, stress_level || 5, weight_kg || null, notes || null]);
+            await (0, db_1.execute)('INSERT INTO daily_logs (program_id, user_id, log_date, kalori_makan, air_liter, bakar_kalori, jam_istirahat, mood, stress_level, weight_kg, notes, sleep_start, sleep_end, sleep_quality) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [program_id, req.user.id, today, kalori_makan, air_liter, bakar_kalori, jam_istirahat, mood, stress_level || 5, weight_kg || null, notes || null, sleep_start || null, sleep_end || null, sleep_quality || null]);
         }
         res.json({ success: true });
     }
@@ -187,7 +196,6 @@ async function getOrCreateDailyLog(program_id, user_id, log_date) {
 }
 async function getDetailedLogs(req, res) {
     try {
-        console.log('[DEBUG] getDetailedLogs called with query:', req.query);
         if (!req.user)
             return res.status(401).send();
         const { program_id, log_date } = req.query;
@@ -351,7 +359,7 @@ async function scanFoodImage(req, res) {
             return res.status(503).json({ error: 'Gemini API key is not configured' });
         }
         const genAI = new generative_ai_1.GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
         const fileBytes = fs_1.default.readFileSync(req.file.path);
         const mimeType = req.file.mimetype;
         const imageParts = [
