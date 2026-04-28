@@ -70,6 +70,7 @@ const ChatController = __importStar(require("./controllers/chat"));
 const NotificationController = __importStar(require("./controllers/notification"));
 const ConfigController = __importStar(require("./controllers/config"));
 const AdController = __importStar(require("./controllers/ad"));
+const WellnessController = __importStar(require("./controllers/wellness"));
 // ----------------------------------------------------
 // Public Routes
 // ----------------------------------------------------
@@ -105,6 +106,19 @@ app.post('/api/program/nutrition/scan', auth_1.requireAuth, uploadDisk.single('i
 app.get('/api/users/:userId/profile', auth_1.requireAuth, UserController.getProfile);
 app.put('/api/users/:userId/profile', auth_1.requireAuth, UserController.updateProfile);
 app.post('/api/users/:userId/change-password', auth_1.requireAuth, UserController.changePassword);
+// WebAuthn
+app.post('/api/webauthn/register-challenge', auth_1.requireAuth, AuthController.getRegistrationOptions);
+app.post('/api/webauthn/register-verify', auth_1.requireAuth, AuthController.verifyRegistration);
+app.post('/api/webauthn/login-challenge', AuthController.getAuthenticationOptions);
+app.post('/api/webauthn/login-verify', AuthController.verifyAuthentication);
+// PIN Security
+app.post('/api/pin/setup', auth_1.requireAuth, AuthController.setupPIN);
+app.post('/api/pin/disable', auth_1.requireAuth, AuthController.disablePIN);
+app.get('/api/pin/check', AuthController.checkPINEnabled);
+app.post('/api/pin/verify', AuthController.verifyPIN);
+// Wellness Routes
+app.post('/api/wellness/daily', auth_1.requireAuth, WellnessController.logDailyWellness);
+app.get('/api/wellness/daily', auth_1.requireAuth, WellnessController.getDailyWellness);
 // Chat Routes
 app.get('/api/chat/messages/:otherId', auth_1.requireAuth, ChatController.getMessages);
 app.post('/api/chat/messages', auth_1.requireAuth, ChatController.sendMessage);

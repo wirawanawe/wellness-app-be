@@ -6,9 +6,19 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.login = login;
 exports.register = register;
 exports.verifyOTP = verifyOTP;
+exports.getRegistrationOptions = getRegistrationOptions;
+exports.verifyRegistration = verifyRegistration;
+exports.getAuthenticationOptions = getAuthenticationOptions;
+exports.verifyAuthentication = verifyAuthentication;
+exports.setupPIN = setupPIN;
+exports.disablePIN = disablePIN;
+exports.checkPINEnabled = checkPINEnabled;
+exports.verifyPIN = verifyPIN;
 const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const db_1 = require("../db");
 const mailer_1 = require("../utils/mailer");
+const server_1 = require("@simplewebauthn/server");
+const helpers_1 = require("@simplewebauthn/server/helpers");
 async function login(req, res) {
     try {
         const { email, password, app_type } = req.body;
@@ -179,5 +189,212 @@ async function verifyOTP(req, res) {
             return res.status(400).json({ error: 'Data sudah terdaftar' });
         }
         res.status(500).json({ error: 'Gagal memverifikasi OTP' });
+    }
+}
+// ── WEBAUTHN (BIOMETRIC) ───────────────────────────────────────
+async function getRegistrationOptions(req, res) {
+    try {
+        if (!req.user)
+            return res.status(401).json({ error: 'Unauthorized' });
+        const user = await (0, db_1.queryOne)('SELECT email, name FROM users u LEFT JOIN employees e ON e.user_id = u.id WHERE u.id = ?', [req.user.id]);
+        if (!user)
+            return res.status(404).json({ error: 'User not found' });
+        const host = req.headers.host?.split(':')[0] || 'localhost';
+        const RP_ID = host;
+        const options = await (0, server_1.generateRegistrationOptions)({
+            rpName: 'Wellness PHC Mobile',
+            rpID: RP_ID,
+            userID: helpers_1.isoBase64URL.toBuffer(req.user.id.toString(), 'base64url'),
+            userName: user.email,
+            attestationType: 'none',
+            authenticatorSelection: {
+                residentKey: 'discouraged',
+                userVerification: 'preferred',
+                authenticatorAttachment: 'platform',
+            },
+        });
+        await (0, db_1.execute)('INSERT INTO webauthn_challenges (user_id, challenge) VALUES (?, ?)', [req.user.id, options.challenge]);
+        res.json(options);
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+}
+async function verifyRegistration(req, res) {
+    try {
+        if (!req.user)
+            return res.status(401).json({ error: 'Unauthorized' });
+        const body = req.body;
+        const challengeRecord = await (0, db_1.queryOne)('SELECT challenge FROM webauthn_challenges WHERE user_id = ? ORDER BY created_at DESC LIMIT 1', [req.user.id]);
+        if (!challengeRecord)
+            return res.status(400).json({ error: 'Challenge not found' });
+        const verification = await (0, server_1.verifyRegistrationResponse)({
+            response: body,
+            expectedChallenge: challengeRecord.challenge,
+            expectedOrigin: req.headers.origin || `http://${req.headers.host}`,
+            expectedRPID: req.headers.host?.split(':')[0] || 'localhost',
+        });
+        if (verification.verified && verification.registrationInfo) {
+            const { credential } = verification.registrationInfo;
+            await (0, db_1.execute)('INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter) VALUES (?, ?, ?, ?)', [req.user.id, credential.id, helpers_1.isoBase64URL.fromBuffer(credential.publicKey), credential.counter]);
+            await (0, db_1.execute)('DELETE FROM webauthn_challenges WHERE user_id = ?', [req.user.id]);
+            res.json({ success: true });
+        }
+        else {
+            res.status(400).json({ error: 'Verification failed' });
+        }
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+}
+async function getAuthenticationOptions(req, res) {
+    try {
+        const host = req.headers.host?.split(':')[0] || 'localhost';
+        const RP_ID = host;
+        const options = await (0, server_1.generateAuthenticationOptions)({
+            rpID: RP_ID,
+            userVerification: 'preferred',
+        });
+        await (0, db_1.execute)('INSERT INTO webauthn_challenges (challenge) VALUES (?)', [options.challenge]);
+        res.json(options);
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+}
+async function verifyAuthentication(req, res) {
+    try {
+        const body = req.body;
+        // Find the credential
+        const cred = await (0, db_1.queryOne)('SELECT * FROM webauthn_credentials WHERE credential_id = ?', [body.id]);
+        if (!cred)
+            return res.status(404).json({ error: 'Credential not found' });
+        const challengeRecord = await (0, db_1.queryOne)('SELECT challenge FROM webauthn_challenges ORDER BY created_at DESC LIMIT 1');
+        if (!challengeRecord)
+            return res.status(400).json({ error: 'Challenge not found' });
+        const verification = await (0, server_1.verifyAuthenticationResponse)({
+            response: body,
+            expectedChallenge: challengeRecord.challenge,
+            expectedOrigin: req.headers.origin || `http://${req.headers.host}`,
+            expectedRPID: req.headers.host?.split(':')[0] || 'localhost',
+            credential: {
+                id: cred.credential_id,
+                publicKey: helpers_1.isoBase64URL.toBuffer(cred.public_key, 'base64url'),
+                counter: cred.counter,
+            },
+        });
+        if (verification.verified) {
+            await (0, db_1.execute)('UPDATE webauthn_credentials SET counter = ? WHERE id = ?', [verification.authenticationInfo.newCounter, cred.id]);
+            // Return user data for login
+            const user = await (0, db_1.queryOne)(`SELECT u.id, u.email, u.role, 
+                COALESCE(d.name, e.name) as name, 
+                COALESCE(d.profile_photo_url, e.avatar_url) as avatar_url,
+                e.company_id 
+         FROM users u 
+         LEFT JOIN doctors d ON d.id = u.doctor_id 
+         LEFT JOIN employees e ON e.id = u.employee_id_ref 
+         WHERE u.id = ?`, [cred.user_id]);
+            await (0, db_1.execute)('DELETE FROM webauthn_challenges WHERE challenge = ?', [challengeRecord.challenge]);
+            res.json({
+                user: {
+                    id: String(user.id),
+                    name: user.name,
+                    email: user.email,
+                    role: user.role,
+                    companyId: user.company_id,
+                    image: user.avatar_url,
+                }
+            });
+        }
+        else {
+            res.status(400).json({ error: 'Authentication failed' });
+        }
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+}
+// ── PIN SECURITY ───────────────────────────────────────────────
+async function setupPIN(req, res) {
+    try {
+        const { pin } = req.body;
+        const userId = req.user?.id;
+        if (!userId)
+            return res.status(401).json({ error: 'Unauthorized' });
+        if (!pin || pin.length !== 6 || !/^\d+$/.test(pin)) {
+            return res.status(400).json({ error: 'PIN must be 6 digits' });
+        }
+        const hashedPin = await bcryptjs_1.default.hash(pin, 10);
+        await (0, db_1.execute)('UPDATE users SET security_pin = ?, pin_enabled = TRUE WHERE id = ?', [hashedPin, userId]);
+        res.json({ success: true, message: 'PIN set successfully' });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+}
+async function disablePIN(req, res) {
+    try {
+        const userId = req.user?.id;
+        if (!userId)
+            return res.status(401).json({ error: 'Unauthorized' });
+        await (0, db_1.execute)('UPDATE users SET pin_enabled = FALSE WHERE id = ?', [userId]);
+        res.json({ success: true, message: 'PIN disabled' });
+    }
+    catch (error) {
+        res.status(500).json({ error: 'Internal server error' });
+    }
+}
+async function checkPINEnabled(req, res) {
+    try {
+        const { email } = req.query;
+        if (!email)
+            return res.status(400).json({ error: 'Email required' });
+        const user = await (0, db_1.queryOne)('SELECT pin_enabled FROM users WHERE email = ?', [email]);
+        res.json({ enabled: !!user?.pin_enabled });
+    }
+    catch (error) {
+        res.status(500).json({ error: 'Error checking PIN status' });
+    }
+}
+async function verifyPIN(req, res) {
+    try {
+        const { email, pin } = req.body;
+        const user = await (0, db_1.queryOne)('SELECT id, security_pin, pin_enabled FROM users WHERE email = ?', [email]);
+        if (!user || !user.pin_enabled || !user.security_pin) {
+            return res.status(400).json({ error: 'PIN security not enabled' });
+        }
+        const isValid = await bcryptjs_1.default.compare(pin, user.security_pin);
+        if (!isValid) {
+            return res.status(401).json({ error: 'Invalid PIN' });
+        }
+        const fullUser = await (0, db_1.queryOne)(`
+        SELECT u.id, u.email, u.role, 
+               COALESCE(d.name, e.name) as name, 
+               COALESCE(d.profile_photo_url, e.avatar_url) as avatar_url,
+               e.company_id 
+        FROM users u 
+        LEFT JOIN doctors d ON d.id = u.doctor_id 
+        LEFT JOIN employees e ON e.id = u.employee_id_ref 
+        WHERE u.id = ?`, [user.id]);
+        res.json({
+            user: {
+                id: String(fullUser.id),
+                name: fullUser.name,
+                email: fullUser.email,
+                role: fullUser.role,
+                companyId: fullUser.company_id,
+                image: fullUser.avatar_url,
+            }
+        });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Internal server error' });
     }
 }

@@ -79,6 +79,20 @@ app.get('/api/users/:userId/profile', requireAuth, UserController.getProfile);
 app.put('/api/users/:userId/profile', requireAuth, UserController.updateProfile);
 app.post('/api/users/:userId/change-password', requireAuth, UserController.changePassword);
 
+// WebAuthn
+app.post('/api/webauthn/register-challenge', requireAuth, AuthController.getRegistrationOptions);
+app.post('/api/webauthn/register-verify', requireAuth, AuthController.verifyRegistration);
+app.post('/api/webauthn/login-challenge', AuthController.getAuthenticationOptions);
+app.post('/api/webauthn/login-verify', AuthController.verifyAuthentication);
+
+// PIN Security
+app.post('/api/pin/setup', requireAuth, AuthController.setupPIN);
+app.post('/api/pin/disable', requireAuth, AuthController.disablePIN);
+app.get('/api/pin/check', AuthController.checkPINEnabled);
+app.post('/api/pin/verify', AuthController.verifyPIN);
+
+
+
 // Chat Routes
 app.get('/api/chat/messages/:otherId', requireAuth, ChatController.getMessages);
 app.post('/api/chat/messages', requireAuth, ChatController.sendMessage);

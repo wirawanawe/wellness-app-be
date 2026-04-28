@@ -2,6 +2,16 @@ import { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { queryOne, execute, query } from '../db';
 import { sendEmail } from '../utils/mailer';
+import { 
+  generateRegistrationOptions, 
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse
+} from '@simplewebauthn/server';
+import { isoBase64URL } from '@simplewebauthn/server/helpers';
+
+
+
 
 export async function login(req: Request, res: Response) {
   try {
@@ -191,5 +201,269 @@ export async function verifyOTP(req: Request, res: Response) {
       return res.status(400).json({ error: 'Data sudah terdaftar' });
     }
     res.status(500).json({ error: 'Gagal memverifikasi OTP' });
+  }
+}
+
+// ── WEBAUTHN (BIOMETRIC) ───────────────────────────────────────
+
+
+
+
+export async function getRegistrationOptions(req: Request, res: Response) {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const user = await queryOne('SELECT email, name FROM users u LEFT JOIN employees e ON e.user_id = u.id WHERE u.id = ?', [req.user.id]);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const host = req.headers.host?.split(':')[0] || 'localhost';
+    const RP_ID = host;
+    const options = await generateRegistrationOptions({
+      rpName: 'Wellness PHC Mobile',
+      rpID: RP_ID,
+
+      userID: isoBase64URL.toBuffer(req.user.id.toString(), 'base64url'),
+      userName: user.email,
+      attestationType: 'none',
+      authenticatorSelection: {
+        residentKey: 'discouraged',
+        userVerification: 'preferred',
+        authenticatorAttachment: 'platform',
+      },
+
+
+    });
+
+
+
+
+    await execute('INSERT INTO webauthn_challenges (user_id, challenge) VALUES (?, ?)', [req.user.id, options.challenge]);
+
+    res.json(options);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function verifyRegistration(req: Request, res: Response) {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const body = req.body;
+    const challengeRecord = await queryOne(
+      'SELECT challenge FROM webauthn_challenges WHERE user_id = ? ORDER BY created_at DESC LIMIT 1',
+      [req.user.id]
+    );
+
+    if (!challengeRecord) return res.status(400).json({ error: 'Challenge not found' });
+
+    const verification = await verifyRegistrationResponse({
+      response: body,
+      expectedChallenge: challengeRecord.challenge,
+      expectedOrigin: req.headers.origin || `http://${req.headers.host}`,
+      expectedRPID: req.headers.host?.split(':')[0] || 'localhost',
+
+    });
+
+    if (verification.verified && verification.registrationInfo) {
+      const { credential } = verification.registrationInfo;
+
+      await execute(
+        'INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter) VALUES (?, ?, ?, ?)',
+        [req.user.id, credential.id, isoBase64URL.fromBuffer(credential.publicKey), credential.counter]
+      );
+
+
+      await execute('DELETE FROM webauthn_challenges WHERE user_id = ?', [req.user.id]);
+
+      res.json({ success: true });
+    } else {
+      res.status(400).json({ error: 'Verification failed' });
+    }
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function getAuthenticationOptions(req: Request, res: Response) {
+  try {
+    const host = req.headers.host?.split(':')[0] || 'localhost';
+    const RP_ID = host;
+
+    const options = await generateAuthenticationOptions({
+      rpID: RP_ID,
+      userVerification: 'preferred',
+    });
+
+    await execute('INSERT INTO webauthn_challenges (challenge) VALUES (?)', [options.challenge]);
+
+    res.json(options);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function verifyAuthentication(req: Request, res: Response) {
+  try {
+    const body = req.body;
+    
+    // Find the credential
+    const cred = await queryOne(
+      'SELECT * FROM webauthn_credentials WHERE credential_id = ?',
+      [body.id]
+    );
+
+    if (!cred) return res.status(404).json({ error: 'Credential not found' });
+
+    const challengeRecord = await queryOne(
+      'SELECT challenge FROM webauthn_challenges ORDER BY created_at DESC LIMIT 1'
+    );
+
+    if (!challengeRecord) return res.status(400).json({ error: 'Challenge not found' });
+
+    const verification = await verifyAuthenticationResponse({
+      response: body,
+      expectedChallenge: challengeRecord.challenge,
+      expectedOrigin: req.headers.origin || `http://${req.headers.host}`,
+      expectedRPID: req.headers.host?.split(':')[0] || 'localhost',
+
+      credential: {
+        id: cred.credential_id,
+        publicKey: isoBase64URL.toBuffer(cred.public_key, 'base64url'),
+        counter: cred.counter,
+      },
+    });
+
+
+    if (verification.verified) {
+      await execute(
+        'UPDATE webauthn_credentials SET counter = ? WHERE id = ?',
+        [verification.authenticationInfo.newCounter, cred.id]
+      );
+
+      // Return user data for login
+      const user = await queryOne(
+        `SELECT u.id, u.email, u.role, 
+                COALESCE(d.name, e.name) as name, 
+                COALESCE(d.profile_photo_url, e.avatar_url) as avatar_url,
+                e.company_id 
+         FROM users u 
+         LEFT JOIN doctors d ON d.id = u.doctor_id 
+         LEFT JOIN employees e ON e.id = u.employee_id_ref 
+         WHERE u.id = ?`,
+        [cred.user_id]
+      );
+
+      await execute('DELETE FROM webauthn_challenges WHERE challenge = ?', [challengeRecord.challenge]);
+
+      res.json({
+        user: {
+          id: String(user.id),
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          companyId: user.company_id,
+          image: user.avatar_url,
+        }
+      });
+    } else {
+      res.status(400).json({ error: 'Authentication failed' });
+    }
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+
+
+// ── PIN SECURITY ───────────────────────────────────────────────
+
+export async function setupPIN(req: Request, res: Response) {
+  try {
+    const { pin } = req.body;
+    const userId = (req as any).user?.id;
+
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    if (!pin || pin.length !== 6 || !/^\d+$/.test(pin)) {
+      return res.status(400).json({ error: 'PIN must be 6 digits' });
+    }
+
+    const hashedPin = await bcrypt.hash(pin, 10);
+    await execute('UPDATE users SET security_pin = ?, pin_enabled = TRUE WHERE id = ?', [hashedPin, userId]);
+
+    res.json({ success: true, message: 'PIN set successfully' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function disablePIN(req: Request, res: Response) {
+  try {
+    const userId = (req as any).user?.id;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    await execute('UPDATE users SET pin_enabled = FALSE WHERE id = ?', [userId]);
+    res.json({ success: true, message: 'PIN disabled' });
+  } catch (error) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function checkPINEnabled(req: Request, res: Response) {
+  try {
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ error: 'Email required' });
+
+    const user = await queryOne('SELECT pin_enabled FROM users WHERE email = ?', [email]);
+    res.json({ enabled: !!user?.pin_enabled });
+  } catch (error) {
+    res.status(500).json({ error: 'Error checking PIN status' });
+  }
+}
+
+export async function verifyPIN(req: Request, res: Response) {
+  try {
+    const { email, pin } = req.body;
+
+    const user = await queryOne('SELECT id, security_pin, pin_enabled FROM users WHERE email = ?', [email]);
+    if (!user || !user.pin_enabled || !user.security_pin) {
+      return res.status(400).json({ error: 'PIN security not enabled' });
+    }
+
+    const isValid = await bcrypt.compare(pin, user.security_pin);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Invalid PIN' });
+    }
+
+    const fullUser = await queryOne(`
+        SELECT u.id, u.email, u.role, 
+               COALESCE(d.name, e.name) as name, 
+               COALESCE(d.profile_photo_url, e.avatar_url) as avatar_url,
+               e.company_id 
+        FROM users u 
+        LEFT JOIN doctors d ON d.id = u.doctor_id 
+        LEFT JOIN employees e ON e.id = u.employee_id_ref 
+        WHERE u.id = ?`,
+      [user.id]
+    );
+
+    res.json({
+      user: {
+        id: String(fullUser.id),
+        name: fullUser.name,
+        email: fullUser.email,
+        role: fullUser.role,
+        companyId: fullUser.company_id,
+        image: fullUser.avatar_url,
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 }
