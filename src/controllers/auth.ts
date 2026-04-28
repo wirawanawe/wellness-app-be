@@ -397,7 +397,7 @@ export async function setupPIN(req: Request, res: Response) {
 
     res.json({ success: true, message: 'PIN set successfully' });
   } catch (error) {
-    console.error(error);
+    console.error('[SETUP PIN ERROR]', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 }
@@ -419,9 +419,10 @@ export async function checkPINEnabled(req: Request, res: Response) {
     const { email } = req.query;
     if (!email) return res.status(400).json({ error: 'Email required' });
 
-    const user = await queryOne('SELECT pin_enabled FROM users WHERE email = ?', [email]);
+    const user = await queryOne('SELECT pin_enabled FROM users WHERE email = ?', [String(email)]);
     res.json({ enabled: !!user?.pin_enabled });
   } catch (error) {
+    console.error('[CHECK PIN ERROR]', error);
     res.status(500).json({ error: 'Error checking PIN status' });
   }
 }
