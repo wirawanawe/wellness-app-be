@@ -360,7 +360,11 @@ async function checkPINEnabled(req, res) {
     }
     catch (error) {
         console.error('[CHECK PIN ERROR]', error);
-        res.status(500).json({ error: 'Error checking PIN status' });
+        res.status(500).json({
+            error: 'Error checking PIN status',
+            details: error.message,
+            stack: error.stack
+        });
     }
 }
 async function verifyPIN(req, res) {

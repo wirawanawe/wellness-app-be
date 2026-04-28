@@ -421,9 +421,13 @@ export async function checkPINEnabled(req: Request, res: Response) {
 
     const user = await queryOne('SELECT pin_enabled FROM users WHERE email = ?', [String(email)]);
     res.json({ enabled: !!user?.pin_enabled });
-  } catch (error) {
+  } catch (error: any) {
     console.error('[CHECK PIN ERROR]', error);
-    res.status(500).json({ error: 'Error checking PIN status' });
+    res.status(500).json({ 
+      error: 'Error checking PIN status', 
+      details: error.message,
+      stack: error.stack
+    });
   }
 }
 
